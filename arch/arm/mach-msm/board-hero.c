@@ -949,6 +949,12 @@ static struct platform_device *devices[] __initdata = {
 	&msm_device_smd,
 	&msm_device_nand,
 	&msm_device_i2c,
+#ifdef CONFIG_SERIAL_MSM_HS
+	&msm_device_uart_dm1,
+#else
+	&msm_device_uart1,
+#endif
+	&msm_device_uart3,
 #ifdef CONFIG_MT9P012
 	&msm_camera_sensor_mt9p012,
 #endif
@@ -1150,14 +1156,6 @@ static void __init hero_init(void)
 	i2c_register_board_info(0, i2c_devices, ARRAY_SIZE(i2c_devices));
 }
 
-static struct map_desc hero_io_desc[] __initdata = {
-	{
-		.virtual = HERO_CPLD_BASE,
-		.pfn     = __phys_to_pfn(HERO_CPLD_START),
-		.length  = HERO_CPLD_SIZE,
-		.type    = MT_DEVICE_NONSHARED
-	}
-};
 static void __init hero_fixup(struct machine_desc *desc, struct tag *tags,
 				  char **cmdline, struct meminfo *mi)
 {
@@ -1175,7 +1173,6 @@ static void __init hero_fixup(struct machine_desc *desc, struct tag *tags,
 static void __init hero_map_io(void)
 {
 	msm_map_common_io();
-	iotable_init(hero_io_desc, ARRAY_SIZE(hero_io_desc));
 	msm_clock_init(msm_clocks_7x01a, msm_num_clocks_7x01a);
 }
 
