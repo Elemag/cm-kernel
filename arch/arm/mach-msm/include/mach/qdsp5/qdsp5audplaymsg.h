@@ -35,6 +35,8 @@ $Header: //source/qcom/qct/multimedia2/Audio/drivers/QDSP5Driver/QDSP5Interface/
 
 ===========================================================================*/
 #define AUDPLAY_MSG_DEC_NEEDS_DATA		0x0001
+#define AUDPLAY_MSG_STREAM_INFO			0x0003
+
 #define AUDPLAY_MSG_DEC_NEEDS_DATA_MSG_LEN	\
 	sizeof(audplay_msg_dec_needs_data)
 
@@ -67,4 +69,6 @@ struct audplay_msg_buffer_update {
 	unsigned int buf1_address;
 	unsigned int buf1_length;
 } __attribute__((packed));
+
+#define ADSP_MESSAGE_ID -1
 #endif /* QDSP5AUDPLAYMSG_H */

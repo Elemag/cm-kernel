@@ -11,6 +11,18 @@
  * GNU General Public License for more details.
  */
 
+/*
+ * Upgraded version of the original microp_i2c found in the hero(c) sources
+ * Changes so far:
+ * - Rearrangement of functions/structures or well everything
+ * - Adds irq-chip code so it actually boots without changes to gpio.c etc.
+ *
+ * Note: this bugger still ain't finnished...
+ *
+ * Riemer van der Zee
+ * riemervdzee@gmail.com
+ */
+
 #define DEBUG
 
 #include <linux/kernel.h>
@@ -29,11 +41,13 @@
 #include <linux/bma150.h>
 #include <linux/miscdevice.h>
 #include <linux/input.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <linux/earlysuspend.h>
 #include <mach/htc_battery.h>
 #include <mach/drv_callback.h>
 #include <linux/lightsensor.h>
+#include <linux/irq.h>
+#include <asm/mach-types.h>
 
 #define ENABLE_READ_35MM_ADC_VALUE_FROM_ATTR_FILE
 
@@ -648,6 +662,7 @@ static void microp_i2c_clear_led_data(struct i2c_client *client)
 	}
 }
 
+/* Riemer: tracked down the system hang here */
 static irqreturn_t microp_i2c_intr_irq_handler(int irq, void *dev_id)
 {
 	struct i2c_client *client;
@@ -656,7 +671,7 @@ static irqreturn_t microp_i2c_intr_irq_handler(int irq, void *dev_id)
 	client = to_i2c_client(dev_id);
 	cdata = i2c_get_clientdata(client);
 
-	disable_irq(client->irq);
+	disable_irq_nosync(client->irq); // Same as irq?
 	queue_work(cdata->microp_queue, &cdata->work.work);
 	return IRQ_HANDLED;
 }
@@ -987,7 +1002,7 @@ static int microp_get_mic_value(void *argu)
 	return ret;
 }
 
-static void microp_unplug_mic(void *argu)
+static int microp_unplug_mic(void *argu)
 {
 	struct microp_i2c_platform_data *pdata;
 	struct i2c_client *client;
@@ -997,7 +1012,7 @@ static void microp_unplug_mic(void *argu)
 	client = private_microp_client;
 	if (!client)	{
 		printk(KERN_ERR "%s: dataset: client is empty\n", __func__);
-		return;
+		return -EIO;
 	}
 	pdata = client->dev.platform_data;
 
@@ -1005,13 +1020,13 @@ static void microp_unplug_mic(void *argu)
 	ret = set_microp_mic_intr(0);
 	if (ret < 0) {
 		dev_err(&client->dev, "%s: set microp mic interrupt error\n", __func__);
-		return;
+		return -EIO;
 	}
 
 	pdata->microp_mic_status = 0;
 	dev_dbg(&client->dev, "%s: microp_mic_status (plug out): 0x%d\n", __func__, pdata->microp_mic_status);
 
-	return;
+	return 0;
 }
 
 int microp_i2c_set_pin_mode(uint8_t pin, uint8_t mode, void *dev_id)
@@ -2170,6 +2185,34 @@ static void microp_i2c_auto_bl_work_func(struct work_struct *work)
 
 
 /*-----------------------------------------
+   microp irq setup
+ -----------------------------------------*/
+
+static void microp_irq_ack(unsigned int irq)
+{
+	;
+}
+
+static void microp_irq_mask(unsigned int irq)
+{
+	;
+}
+
+static void microp_irq_unmask(unsigned int irq)
+{
+	;
+}
+
+static struct irq_chip microp_irq_chip = {
+	.name = "microp_chip",
+	.disable = microp_irq_mask,
+	.ack = microp_irq_ack,
+	.mask = microp_irq_mask,
+	.unmask = microp_irq_unmask,
+};
+
+
+/*-----------------------------------------
    Initialisator function
  -----------------------------------------*/
 
@@ -2833,9 +2876,8 @@ static int microp_i2c_probe(struct i2c_client *client,
 	INIT_DELAYED_WORK(&auto_bl_delay_work,
 			microp_i2c_auto_bl_work_func);
 
-	// Riemer: Does not work
 	/* Light Sensor */
-	/*cdata->ls_input_dev = input_allocate_device();
+	cdata->ls_input_dev = input_allocate_device();
 	if (!cdata->ls_input_dev) {
 		pr_err("%s: could not allocate input device\n", __func__);
 		ret = -ENOMEM;
@@ -2857,7 +2899,7 @@ static int microp_i2c_probe(struct i2c_client *client,
 		dev_err(&client->dev, "%s: can not register misc device\n",
 				__func__);
 		goto err_register_misc_register;
-	}*/
+	}
 
 #ifdef CONFIG_HAS_EARLYSUSPEND
 	if (cdata->enable_early_suspend)	{
@@ -3089,6 +3131,15 @@ static struct i2c_driver microp_i2c_driver = {
 
 static int __init microp_i2c_init(void)
 {
+	// Inits the microp irqs
+	int n, MICROP_IRQ_END = FIRST_MICROP_IRQ + NR_MICROP_IRQS;
+
+	for (n = FIRST_MICROP_IRQ; n < MICROP_IRQ_END; n++) {
+		set_irq_chip(n, &microp_irq_chip);
+		set_irq_handler(n, handle_level_irq);
+		set_irq_flags(n, IRQF_VALID);
+	}
+
 	microp_i2c_is_backlight_on = 1;
 
 	wake_lock_init(&microp_i2c_wakelock, WAKE_LOCK_SUSPEND, "microp_i2c_present");
