@@ -27,6 +27,30 @@
 #include <mach/gpio.h>
 #include <mach/camera.h>
 #include "mt9p012.h"
+#include <linux/wakelock.h>
+
+static struct wake_lock mt9p012_wake_lock;
+
+static inline void init_suspend(void)
+{
+	wake_lock_init(&mt9p012_wake_lock, WAKE_LOCK_IDLE, "mt9p012");
+}
+
+static inline void deinit_suspend(void)
+{
+	wake_lock_destroy(&mt9p012_wake_lock);
+}
+
+static inline void prevent_suspend(void)
+{
+	wake_lock(&mt9p012_wake_lock);
+}
+
+static inline void allow_suspend(void)
+{
+	wake_unlock(&mt9p012_wake_lock);
+}
+
 
 /*=============================================================
     SENSOR REGISTER DEFINES
@@ -134,23 +158,25 @@ struct mt9p012_ctrl {
 };
 
 static struct mt9p012_ctrl *mt9p012_ctrl;
+
 static DECLARE_WAIT_QUEUE_HEAD(mt9p012_wait_queue);
+DEFINE_MUTEX(mt9p012_mutex);
 
 static int mt9p012_i2c_rxdata(unsigned short saddr, unsigned char *rxdata,
 			      int length)
 {
 	struct i2c_msg msgs[] = {
 		{
-		 .addr = saddr,
-		 .flags = 0,
-		 .len = 2,
-		 .buf = rxdata,
+			.addr = saddr,
+			.flags = 0,
+			.len = 2,
+			.buf = rxdata,
 		 },
 		{
-		 .addr = saddr,
-		 .flags = I2C_M_RD,
-		 .len = length,
-		 .buf = rxdata,
+			.addr = saddr,
+			.flags = I2C_M_RD,
+			.len = length,
+			.buf = rxdata,
 		 },
 	};
 
@@ -262,6 +288,18 @@ static int mt9p012_i2c_write_w_table(struct mt9p012_i2c_reg_conf
 		reg_conf_tbl++;
 	}
 
+	return rc;
+}
+
+static int mt9p012_gpio_pull(int gpio_pin, int pull_mode)
+{
+	int rc = 0;
+	rc = gpio_request(gpio_pin, "mt9p012");
+	if (!rc)
+		gpio_direction_output(gpio_pin, pull_mode);
+	else
+		printk(KERN_ERR "%s: GPIO(%d) request failed\n", __func__, gpio_pin);
+	gpio_free(gpio_pin);
 	return rc;
 }
 
@@ -910,13 +948,17 @@ static int mt9p012_set_default_focus(void)
 	mt9p012_ctrl->curr_lens_pos = 0;
 	mt9p012_ctrl->init_curr_lens_pos = 0;
 
+	/* TODO fix me... */
+#if 0
 	return rc;
+#else
+	return 0;
+#endif
 }
 
 static int mt9p012_probe_init_done(const struct msm_camera_sensor_info *data)
 {
-	gpio_direction_output(data->sensor_reset, 0);
-	gpio_free(data->sensor_reset);
+	mt9p012_gpio_pull(data->sensor_reset, 0);
 	return 0;
 }
 
@@ -925,10 +967,8 @@ static int mt9p012_probe_init_sensor(const struct msm_camera_sensor_info *data)
 	int rc;
 	uint16_t chipid;
 
-	rc = gpio_request(data->sensor_reset, "mt9p012");
-	if (!rc)
-		gpio_direction_output(data->sensor_reset, 1);
-	else
+	rc = mt9p012_gpio_pull(data->sensor_reset, 1);
+	if (rc)
 		goto init_probe_done;
 
 	mdelay(20);
@@ -991,7 +1031,7 @@ init_probe_done:
 static int mt9p012_sensor_open_init(const struct msm_camera_sensor_info *data)
 {
 	int rc;
-
+	printk("mt9p012_sensor_open_init()\n");
 	mt9p012_ctrl = kzalloc(sizeof(struct mt9p012_ctrl), GFP_KERNEL);
 	if (!mt9p012_ctrl) {
 		CDBG("mt9p012_init failed!\n");
@@ -1108,6 +1148,8 @@ int mt9p012_sensor_config(void __user *argp)
 			   (void *)argp, sizeof(struct sensor_cfg_data)))
 		return -EFAULT;
 
+	mutex_lock(&mt9p012_mutex);
+
 	CDBG("%s: cfgtype = %d\n", __func__, cdata.cfgtype);
 	switch (cdata.cfgtype) {
 	case CFG_GET_PICT_FPS:
@@ -1213,16 +1255,18 @@ int mt9p012_sensor_config(void __user *argp)
 		break;
 	}
 
+	prevent_suspend();
+	mutex_unlock(&mt9p012_mutex);
 	return rc;
 }
 
 int mt9p012_sensor_release(void)
 {
 	int rc = -EBADF;
-
+	mutex_lock(&mt9p012_mutex);
 	mt9p012_power_down();
 
-	gpio_direction_output(mt9p012_ctrl->sensordata->sensor_reset, 0);
+	//mt9p012_gpio_pull(mt9p012_ctrl->sensordata->sensor_reset, 0);
 	gpio_free(mt9p012_ctrl->sensordata->sensor_reset);
 
 	gpio_direction_output(mt9p012_ctrl->sensordata->vcm_pwd, 0);
@@ -1230,9 +1274,9 @@ int mt9p012_sensor_release(void)
 
 	kfree(mt9p012_ctrl);
 	mt9p012_ctrl = NULL;
-
+	allow_suspend();
 	CDBG("mt9p012_release completed\n");
-
+	mutex_unlock(&mt9p012_mutex);
 	return rc;
 }
 
@@ -1273,14 +1317,68 @@ static const struct i2c_device_id mt9p012_i2c_id[] = {
 	{}
 };
 
+static int __exit mt9p012_i2c_remove(struct i2c_client *client)
+{
+	struct mt9p012_work_t *sensorw = i2c_get_clientdata(client);
+
+	printk("mt9p012_i2c_remove()\n");
+
+	free_irq(client->irq, sensorw);
+	deinit_suspend();
+	mt9p012_client = NULL;
+	kfree(sensorw);
+	return 0;
+}
+
 static struct i2c_driver mt9p012_i2c_driver = {
 	.id_table = mt9p012_i2c_id,
-	.probe = mt9p012_i2c_probe,
-	.remove = __exit_p(mt9p012_i2c_remove),
-	.driver = {
-		   .name = "mt9p012",
-		   },
+	.probe    = mt9p012_i2c_probe,
+	.remove   = __exit_p(mt9p012_i2c_remove),
+	.driver   = {
+		.name = "mt9p012",
+	},
 };
+
+
+static const char *mt9p012Vendor = "Micron";
+static const char *mt9p012NAME   = "mt9p012";
+static const char *mt9p012fxSize = "5M";
+
+static ssize_t sensor_vendor_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	ssize_t ret = 0;
+
+	sprintf(buf, "%s %s %s\n", mt9p012Vendor, mt9p012NAME, mt9p012fxSize);
+	ret = strlen(buf) + 1;
+
+	return ret;
+}
+
+static DEVICE_ATTR(sensor, 0444, sensor_vendor_show, NULL);
+
+static struct kobject *android_mt9p012;
+
+static int mt9p012_sysfs_init(void)
+{
+	int ret ;
+	pr_info("mt9p012:kobject creat and add\n");
+	android_mt9p012 = kobject_create_and_add("android_camera", NULL);
+	if (android_mt9p012 == NULL) {
+		pr_info("mt9p012_sysfs_init: subsystem_register " \
+		"failed\n");
+		ret = -ENOMEM;
+		return ret ;
+	}
+	pr_info("mt9p012:sysfs_create_file\n");
+	ret = sysfs_create_file(android_mt9p012, &dev_attr_sensor.attr);
+	if (ret) {
+		pr_info("mt9p012_sysfs_init: sysfs_create_file " \
+		"failed\n");
+		kobject_del(android_mt9p012);
+	}
+	return 0 ;
+}
 
 static int mt9p012_sensor_probe(const struct msm_camera_sensor_info *info,
 				struct msm_sensor_ctrl *s)
@@ -1294,14 +1392,18 @@ static int mt9p012_sensor_probe(const struct msm_camera_sensor_info *info,
 	msm_camio_clk_rate_set(MT9P012_DEFAULT_CLOCK_RATE);
 	mdelay(20);
 
+#if 0
 	rc = mt9p012_probe_init_sensor(info);
 	if (rc < 0)
 		goto probe_done;
+#endif
 
+	init_suspend();
 	s->s_init = mt9p012_sensor_open_init;
 	s->s_release = mt9p012_sensor_release;
 	s->s_config = mt9p012_sensor_config;
 	mt9p012_probe_init_done(info);
+	mt9p012_sysfs_init();
 
 probe_done:
 	CDBG("%s %s:%d\n", __FILE__, __func__, __LINE__);
@@ -1316,9 +1418,9 @@ static int __mt9p012_probe(struct platform_device *pdev)
 static struct platform_driver msm_camera_driver = {
 	.probe = __mt9p012_probe,
 	.driver = {
-		   .name = "msm_camera_mt9p012",
-		   .owner = THIS_MODULE,
-		   },
+		.name = "msm_camera_mt9p012",
+		.owner = THIS_MODULE,
+	},
 };
 
 static int __init mt9p012_init(void)
