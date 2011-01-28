@@ -157,10 +157,35 @@ struct mt9p012_ctrl {
 	enum mt9p012_test_mode set_test;
 };
 
+static uint16_t update_type = UPDATE_PERIODIC;
 static struct mt9p012_ctrl *mt9p012_ctrl;
 
 static DECLARE_WAIT_QUEUE_HEAD(mt9p012_wait_queue);
 DEFINE_MUTEX(mt9p012_mutex);
+
+
+
+#define MAX_I2C_RETRIES 20
+static int i2c_transfer_retry(struct i2c_adapter *adap,
+			struct i2c_msg *msgs,
+			int len)
+{
+	int i2c_retry = 0;
+	int ns; /* number sent */
+
+	while (i2c_retry++ < MAX_I2C_RETRIES) {
+		ns = i2c_transfer(adap, msgs, len);
+		if (ns == len)
+			break;
+		pr_err("%s: try %d/%d: i2c_transfer sent: %d, len %d\n",
+			__func__,
+			i2c_retry, MAX_I2C_RETRIES, ns, len);
+		msleep(10);
+	}
+
+	return ns == len ? 0 : -EIO;
+}
+
 
 static int mt9p012_i2c_rxdata(unsigned short saddr, unsigned char *rxdata,
 			      int length)
@@ -180,12 +205,7 @@ static int mt9p012_i2c_rxdata(unsigned short saddr, unsigned char *rxdata,
 		 },
 	};
 
-	if (i2c_transfer(mt9p012_client->adapter, msgs, 2) < 0) {
-		CDBG("mt9p012_i2c_rxdata failed!\n");
-		return -EIO;
-	}
-
-	return 0;
+	return i2c_transfer_retry(mt9p012_client->adapter, msgs, 2);
 }
 
 static int mt9p012_i2c_read_w(unsigned short saddr, unsigned short raddr,
@@ -226,12 +246,7 @@ static int mt9p012_i2c_txdata(unsigned short saddr, unsigned char *txdata,
 		 },
 	};
 
-	if (i2c_transfer(mt9p012_client->adapter, msg, 1) < 0) {
-		CDBG("mt9p012_i2c_txdata failed\n");
-		return -EIO;
-	}
-
-	return 0;
+	return i2c_transfer_retry(mt9p012_client->adapter, msg, 1);
 }
 
 static int mt9p012_i2c_write_b(unsigned short saddr, unsigned short baddr,
@@ -288,18 +303,6 @@ static int mt9p012_i2c_write_w_table(struct mt9p012_i2c_reg_conf
 		reg_conf_tbl++;
 	}
 
-	return rc;
-}
-
-static int mt9p012_gpio_pull(int gpio_pin, int pull_mode)
-{
-	int rc = 0;
-	rc = gpio_request(gpio_pin, "mt9p012");
-	if (!rc)
-		gpio_direction_output(gpio_pin, pull_mode);
-	else
-		printk(KERN_ERR "%s: GPIO(%d) request failed\n", __func__, gpio_pin);
-	gpio_free(gpio_pin);
 	return rc;
 }
 
@@ -381,25 +384,27 @@ static void mt9p012_get_pict_fps(uint16_t fps, uint16_t *pfps)
 	/* input fps is preview fps in Q8 format */
 	uint32_t divider;	/*Q10 */
 	uint32_t pclk_mult;	/*Q10 */
+	uint32_t d1;
+	uint32_t d2;
 
-	if (mt9p012_ctrl->prev_res == QTR_SIZE) {
-		divider = (uint32_t)
-		    (((mt9p012_regs.reg_pat[RES_PREVIEW].frame_length_lines *
-		       mt9p012_regs.reg_pat[RES_PREVIEW].line_length_pck) *
-		      0x00000400) /
-		     (mt9p012_regs.reg_pat[RES_CAPTURE].frame_length_lines *
-		      mt9p012_regs.reg_pat[RES_CAPTURE].line_length_pck));
+	d1 =
+		(uint32_t)(
+		(mt9p012_regs.reg_pat[RES_PREVIEW].frame_length_lines *
+		0x00000400) /
+		mt9p012_regs.reg_pat[RES_CAPTURE].frame_length_lines);
 
-		pclk_mult =
-		    (uint32_t) ((mt9p012_regs.reg_pat[RES_CAPTURE].
-				 pll_multiplier * 0x00000400) /
-				(mt9p012_regs.reg_pat[RES_PREVIEW].
-				 pll_multiplier));
-	} else {
-		/* full size resolution used for preview. */
-		divider = 0x00000400;	/*1.0 */
-		pclk_mult = 0x00000400;	/*1.0 */
-	}
+	d2 =
+		(uint32_t)(
+		(mt9p012_regs.reg_pat[RES_PREVIEW].line_length_pck *
+		0x00000400) /
+		mt9p012_regs.reg_pat[RES_CAPTURE].line_length_pck);
+
+	divider = (uint32_t) (d1 * d2) / 0x00000400;
+
+	pclk_mult =
+		(uint32_t) ((mt9p012_regs.reg_pat[RES_CAPTURE].pll_multiplier *
+		0x00000400) /
+		(mt9p012_regs.reg_pat[RES_PREVIEW].pll_multiplier));
 
 	/* Verify PCLK settings and frame sizes. */
 	*pfps = (uint16_t) (fps * divider * pclk_mult / 0x00000400 /
@@ -450,6 +455,7 @@ static int mt9p012_set_fps(struct fps_cfg *fps)
 {
 	/* input is new fps in Q10 format */
 	int rc = 0;
+	enum mt9p012_setting setting;
 
 	mt9p012_ctrl->fps_divider = fps->fps_div;
 	mt9p012_ctrl->pict_fps_divider = fps->pict_fps_div;
@@ -460,10 +466,15 @@ static int mt9p012_set_fps(struct fps_cfg *fps)
 	if (rc < 0)
 		return -EBUSY;
 
+	if (mt9p012_ctrl->sensormode == SENSOR_PREVIEW_MODE)
+		setting = RES_PREVIEW;
+	else
+		setting = RES_CAPTURE;
+
 	rc = mt9p012_i2c_write_w(mt9p012_client->addr,
-				 REG_LINE_LENGTH_PCK,
-				 (mt9p012_regs.reg_pat[RES_PREVIEW].
-				  line_length_pck * fps->f_mult / 0x00000400));
+		REG_FRAME_LENGTH_LINES,
+		(mt9p012_regs.reg_pat[setting].frame_length_lines *
+		fps->fps_div / 0x00000400));
 	if (rc < 0)
 		return rc;
 
@@ -494,7 +505,7 @@ static int mt9p012_write_exp_gain(uint16_t gain, uint32_t line)
 	}
 
 	/* Verify no overflow */
-	if (mt9p012_ctrl->sensormode != SENSOR_SNAPSHOT_MODE) {
+	if (mt9p012_ctrl->sensormode == SENSOR_PREVIEW_MODE) {
 		line = (uint32_t) (line * mt9p012_ctrl->fps_divider /
 				   0x00000400);
 		setting = RES_PREVIEW;
@@ -579,11 +590,9 @@ static int mt9p012_setting(enum mt9p012_reg_update rupdate,
 			       enum mt9p012_setting rt)
 {
 	int rc = 0;
-
 	switch (rupdate) {
 	case UPDATE_PERIODIC:
 		if (rt == RES_PREVIEW || rt == RES_CAPTURE) {
-
 			struct mt9p012_i2c_reg_conf ppc_tbl[] = {
 				{REG_GROUPED_PARAMETER_HOLD,
 				 GROUPED_PARAMETER_HOLD},
@@ -617,9 +626,12 @@ static int mt9p012_setting(enum mt9p012_reg_update rupdate,
 				{REG_GROUPED_PARAMETER_HOLD,
 				 GROUPED_PARAMETER_UPDATE},
 			};
-
+			if (update_type == REG_INIT) {
+				update_type = rupdate;
+				return rc;
+			}
 			rc = mt9p012_i2c_write_w_table(&ppc_tbl[0],
-						       ARRAY_SIZE(ppc_tbl));
+						ARRAY_SIZE(ppc_tbl));
 			if (rc < 0)
 				return rc;
 
@@ -793,6 +805,7 @@ static int mt9p012_setting(enum mt9p012_reg_update rupdate,
 			if (rc < 0)
 				return rc;
 		}
+		update_type = rupdate;
 		break;		/* case REG_INIT: */
 
 	default:
@@ -958,7 +971,8 @@ static int mt9p012_set_default_focus(void)
 
 static int mt9p012_probe_init_done(const struct msm_camera_sensor_info *data)
 {
-	mt9p012_gpio_pull(data->sensor_reset, 0);
+	gpio_direction_output(data->sensor_reset, 0);
+	gpio_free(data->sensor_reset);
 	return 0;
 }
 
@@ -967,11 +981,13 @@ static int mt9p012_probe_init_sensor(const struct msm_camera_sensor_info *data)
 	int rc;
 	uint16_t chipid;
 
-	rc = mt9p012_gpio_pull(data->sensor_reset, 1);
-	if (rc)
+	rc = gpio_request(data->sensor_reset, "mt9p012");
+	if (!rc)
+		gpio_direction_output(data->sensor_reset, 1);
+	else
 		goto init_probe_done;
 
-	mdelay(20);
+	msleep(20);
 
 	/* RESET the sensor image part via I2C command */
 	CDBG("mt9p012_sensor_init(): reseting sensor.\n");
@@ -982,7 +998,7 @@ static int mt9p012_probe_init_sensor(const struct msm_camera_sensor_info *data)
 		goto init_probe_fail;
 	}
 
-	mdelay(MT9P012_RESET_DELAY_MSECS);
+	msleep(MT9P012_RESET_DELAY_MSECS);
 
 	/* 3. Read sensor Model ID: */
 	rc = mt9p012_i2c_read_w(mt9p012_client->addr,
@@ -1018,8 +1034,6 @@ static int mt9p012_probe_init_sensor(const struct msm_camera_sensor_info *data)
 		CDBG("disable the 2 extra lines failed. rc = %d\n", rc);
 		goto init_probe_fail;
 	}
-
-	mdelay(MT9P012_RESET_DELAY_MSECS);
 	goto init_probe_done;
 
 init_probe_fail:
@@ -1266,11 +1280,11 @@ int mt9p012_sensor_release(void)
 	mutex_lock(&mt9p012_mutex);
 	mt9p012_power_down();
 
-	//mt9p012_gpio_pull(mt9p012_ctrl->sensordata->sensor_reset, 0);
+	gpio_direction_output(mt9p012_ctrl->sensordata->sensor_reset, 0);
 	gpio_free(mt9p012_ctrl->sensordata->sensor_reset);
 
-	gpio_direction_output(mt9p012_ctrl->sensordata->vcm_pwd, 0);
-	gpio_free(mt9p012_ctrl->sensordata->vcm_pwd);
+	//gpio_direction_output(mt9p012_ctrl->sensordata->vcm_pwd, 0);
+	//gpio_free(mt9p012_ctrl->sensordata->vcm_pwd);
 
 	kfree(mt9p012_ctrl);
 	mt9p012_ctrl = NULL;
