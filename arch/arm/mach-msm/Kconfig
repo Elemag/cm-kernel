@@ -221,6 +221,10 @@ config MACH_QSD8X50A_ST1_5
 
 endmenu
 
+config HTC_PWR_TEST
+		default n
+		bool "HTC pwr_test (gpio writes) on sleep"
+
 config MSM_AMSS_SUPPORT_256MB_EBI1
         default n
         bool "AMSS that support unified 128MB and 256MB EBI1"
@@ -379,6 +383,12 @@ config HTC_PWRSINK
 	depends on MSM_SMD
 	default y
 	bool "HTC Power Sink Driver"
+
+config HTC_SLEEP_MODE_GPIO_DUMP
+	default y
+	bool "HTC Sleep Mode GPIO Dump"
+	help
+	   Support for dumping GPIO status when enter suspend.
 
 config HTC_POWER_COLLAPSE_MAGIC
   default n

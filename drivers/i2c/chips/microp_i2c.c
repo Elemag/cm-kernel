@@ -167,15 +167,16 @@ struct microp_i2c_client_data {
    Just some, to get things compiling
  -----------------------------------------*/
 
-static int microp_i2c_auto_backlight_set_interrupt_mode(struct i2c_client *client, uint8_t enabled);
+static int microp_i2c_auto_backlight_set_interrupt_mode(
+					struct i2c_client *client, uint8_t enabled);
 static void microp_lcd_backlight_gate_set(struct led_classdev *led_cdev,
-			       enum led_brightness brightness);
+					enum led_brightness brightness);
 static void microp_lcd_backlight_notifier_set(struct led_classdev *led_cdev,
-			       enum led_brightness brightness);
+					enum led_brightness brightness);
 static int lightsensor_open(struct inode *inode, struct file *file);
 static int lightsensor_release(struct inode *inode, struct file *file);
 static long lightsensor_ioctl(struct file *file, unsigned int cmd,
-		unsigned long arg);
+					unsigned long arg);
 static int microp_i2c_config_microp(struct i2c_client *client);
 
 
@@ -208,34 +209,34 @@ static struct led_classdev *ldev_lcd_backlight;
 static struct led_classdev *ldev_vkey_backlight;
 
 static struct led_classdev ldev_lcd_backlight_gate = {
-	.name = LCD_BACKLIGHT_GATE,
-	.brightness_set = microp_lcd_backlight_gate_set,
-	.brightness = 255,
+	.name            = LCD_BACKLIGHT_GATE,
+	.brightness_set  = microp_lcd_backlight_gate_set,
+	.brightness      = 255,
 	.default_trigger = LCD_BACKLIGHT_GATE,
 };
 
 static struct led_classdev ldev_lcd_backlight_notifier = {
-	.name = "lcd_notifier",
-	.brightness_set = microp_lcd_backlight_notifier_set,
-	.brightness = 0,
+	.name            = "lcd_notifier",
+	.brightness_set  = microp_lcd_backlight_notifier_set,
+	.brightness      = 0,
 	.default_trigger = LCD_BACKLIGHT_GATE,
 };
 
 static struct file_operations lightsensor_fops = {
-	.owner = THIS_MODULE,
-	.open = lightsensor_open,
-	.release = lightsensor_release,
+	.owner          = THIS_MODULE,
+	.open           = lightsensor_open,
+	.release        = lightsensor_release,
 	.unlocked_ioctl = lightsensor_ioctl
 };
 
 static struct miscdevice lightsensor_misc = {
 	.minor = MISC_DYNAMIC_MINOR,
-	.name = "lightsensor",
-	.fops = &lightsensor_fops
+	.name  = "lightsensor",
+	.fops  = &lightsensor_fops
 };
 
 static struct led_trigger light_sensor_trigger = {
-	.name     = "light-sensor-trigger",
+	.name  = "light-sensor-trigger",
 };
 
 
@@ -409,14 +410,18 @@ int microp_i2c_is_supported(uint8_t func, uint16_t version)
 static char *hex2string(uint8_t *data, int len)
 {
 	static char buf[101];
-	int i;
+	int i, j;
+	struct i2c_client *client = private_microp_client;
 
 	i = (sizeof(buf) - 1) / 4;
-	if (len > i)
+	if (len > i) {
+		dev_info(&client->dev, "%s is called with a too large length\n",
+				__func__);
 		len = i;
+	}
 
-	for (i = 0; i < len; i++)
-		sprintf(buf + i * 4, "[%02X]", data[i]);
+	for (i = 0, j = 0; i < len; i++, j+=4)
+		sprintf(buf + j, "[%02X]", data[i]);
 
 	return buf;
 }
@@ -428,21 +433,21 @@ static int i2c_read_block(struct i2c_client *client, uint8_t addr,
 	int ret;
 	struct i2c_msg msgs[] = {
 	{
-		.addr = client->addr,
+		.addr  = client->addr,
 		.flags = 0,
-		.len = 1,
-		.buf = &addr,
+		.len   = 1,
+		.buf   = &addr,
 	},
 	{
-		.addr = client->addr,
+		.addr  = client->addr,
 		.flags = I2C_M_RD,
-		.len = length,
-		.buf = data,
+		.len   = length,
+		.buf   = data,
 	}
 	};
 
 	mdelay(1);
-	for (retry = 0; retry <= I2C_READ_RETRY_TIMES; retry++) {
+	for (retry = 0; retry < I2C_READ_RETRY_TIMES; retry++) {
 		ret = i2c_transfer(client->adapter, msgs, 2);
 		if (ret == 2) {
 			dev_dbg(&client->dev, "R [%02X] = %s\n", addr,
@@ -466,10 +471,10 @@ static int i2c_write_block(struct i2c_client *client, uint8_t addr,
 
 	struct i2c_msg msg[] = {
 	{
-		.addr = client->addr,
+		.addr  = client->addr,
 		.flags = 0,
-		.len = length + 1,
-		.buf = buf,
+		.len   = length + 1,
+		.buf   = buf,
 	}
 	};
 
@@ -485,7 +490,7 @@ static int i2c_write_block(struct i2c_client *client, uint8_t addr,
 	memcpy((void *)&buf[1], (void *)data, length);
 
 	mdelay(1);
-	for (retry = 0; retry <= I2C_WRITE_RETRY_TIMES; retry++) {
+	for (retry = 0; retry < I2C_WRITE_RETRY_TIMES; retry++) {
 		ret = i2c_transfer(client->adapter, msg, 1);
 		if (ret == 1)
 			return 0;
@@ -654,24 +659,24 @@ static void microp_i2c_clear_led_data(struct i2c_client *client)
 			cdata->led_data[i].mode = 1;
 		else
 			cdata->led_data[i].mode = 0;
-		cdata->led_data[i].fade_timer = 0;
-		cdata->led_data[i].off_timer = 0;
+
+		cdata->led_data[i].fade_timer  = 0;
+		cdata->led_data[i].off_timer   = 0;
 		cdata->led_data[i].skip_config = 0;
 
 		mutex_unlock(&cdata->led_data[i].pin_mutex);
 	}
 }
 
-/* Riemer: tracked down the system hang here */
 static irqreturn_t microp_i2c_intr_irq_handler(int irq, void *dev_id)
 {
 	struct i2c_client *client;
 	struct microp_i2c_client_data *cdata;
 
 	client = to_i2c_client(dev_id);
-	cdata = i2c_get_clientdata(client);
+	cdata  = i2c_get_clientdata(client);
 
-	disable_irq_nosync(client->irq); // Same as irq?
+	disable_irq_nosync(client->irq);
 	queue_work(cdata->microp_queue, &cdata->work.work);
 	return IRQ_HANDLED;
 }
@@ -786,7 +791,7 @@ void get_3_button_key(void)
 			break;
 	}
 
-	memset(data, 0x00, sizeof(data));
+	memset(data, 0x00, sizeof(data)); // Required?
 	if (i2c_read_block(client, MICROP_I2C_CMD_ADC_READ_DATA, data, 3) < 0) {
 		dev_err(&client->dev, "%s: read adc fail\n", __func__);
 	} else {
@@ -842,7 +847,7 @@ int set_microp_mic_intr(int enable)
 		return -EINVAL;
 	}
 
-	memset(data, 0x00, sizeof(data));
+	memset(data, 0x00, sizeof(data)); // Required?
 	for (i = 0; i < pdata->num_pins; i++) {
 		pin = pdata->pin_config[i].pin;
 		config = pdata->pin_config[i].config;
@@ -900,7 +905,7 @@ static int microp_get_pin_status(uint8_t query_pin)
 
 	tmp_pin = -1;
 	tmp_pinset = -1;
-	memset(data, 0x0, sizeof(data));
+	memset(data, 0x0, sizeof(data)); // Required?
 	for (loop_i = 0; loop_i < 3; loop_i++) {
 		for (loop_j = 0; loop_j < 8; loop_j++) {
 			if (pin_alloc[loop_i][loop_j] == query_pin) {
@@ -2170,6 +2175,11 @@ static void microp_i2c_auto_bl_work_func(struct work_struct *work)
 	uint8_t data[2] = {0, 0};
 	int ret = 0;
 
+	if (!client) {
+		printk(KERN_ERR "%s: dataset: client is empty\n", __func__);
+		return;
+	}
+
 	cdata = i2c_get_clientdata(client);
 
 	data[0] |= 0x04;
@@ -2244,12 +2254,16 @@ static int microp_i2c_config_microp(struct i2c_client *client)
 				data[0] = pin;
 				data[1] = config;
 				ret = i2c_write_block(client, MICROP_I2C_CMD_PIN_CONFIG, data, 2);
-				if (ret)
+				if (ret) {
+					pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 					goto err_led;
+				}
 
 				ret = microp_i2c_write_pin_mode(client, &cdata->led_data[led]);
-				if (ret)
+				if (ret) {
+					pr_err("%s: pinmode failed at %d\n", __func__, __LINE__);
 					goto err_led;
+				}
 
 				mutex_unlock(&cdata->led_data[led].pin_mutex);
 				led++;
@@ -2257,8 +2271,10 @@ static int microp_i2c_config_microp(struct i2c_client *client)
 				data[0] = pin;
 				data[1] = config;
 				ret = i2c_write_block(client, MICROP_I2C_CMD_PIN_CONFIG, data, 2);
-				if (ret)
+				if (ret) {
+					pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 					goto exit;
+				}
 			}
 		} else if (microp_i2c_is_pwm(config)) {
 			if (!microp_i2c_is_supported(FUNC_MICROP_PWM, cdata->version))
@@ -2270,12 +2286,16 @@ static int microp_i2c_config_microp(struct i2c_client *client)
 			if (cdata->led_data[led].skip_config == 0) {
 				data[1] = config;
 				ret = i2c_write_block(client, MICROP_I2C_CMD_PIN_CONFIG, data, 2);
-				if (ret)
+				if (ret) {
+					pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 					goto err_led;
+				}
 
 				ret = microp_i2c_write_pin_mode(client, &cdata->led_data[led]);
-				if (ret)
+				if (ret) {
+					pr_err("%s: pinmode failed at %d\n", __func__, __LINE__);
 					goto err_led;
+				}
 
 				data[1] = MICROP_I2C_PWM_FREQ;
 				data[2] = pdata->pin_config[i].freq;
@@ -2288,16 +2308,20 @@ static int microp_i2c_config_microp(struct i2c_client *client)
 					j = 3;
 				}
 				ret = i2c_write_block(client, MICROP_I2C_CMD_PIN_PWM, data, j);
-				if (ret)
+				if (ret) {
+					pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 					goto err_led;
+				}
 
 				if (!microp_i2c_is_supported(FUNC_MICROP_SET_FREQ_FADE,
 					cdata->version)) {
 					data[1] = MICROP_I2C_PWM_FADE;
 					data[2] = cdata->led_data[led].fade_timer;
 					ret = i2c_write_block(client, MICROP_I2C_CMD_PIN_PWM, data, 3);
-					if (ret)
+					if (ret) {
+						pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 						goto err_led;
+					}
 				}
 			}
 
@@ -2306,15 +2330,19 @@ static int microp_i2c_config_microp(struct i2c_client *client)
 					microp_i2c_is_supported(FUNC_MICROP_PWM_TRACKBALL, cdata->version)) {
 					data[1] = MICROP_I2C_PWM_FADE;
 					ret = i2c_write_block(client, MICROP_I2C_CMD_PIN_CONFIG, data, 2);
-					if (ret)
+					if (ret) {
+						pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 						goto err_led;
+					}
 				} else {
 					data[1] = MICROP_I2C_PWM_LEVELS;
 					for (j = 0; j < 10; j++)
 						data[j+2] = pdata->pin_config[i].dutys[j];
 					ret = i2c_write_block(client, MICROP_I2C_CMD_PIN_PWM, data, 12);
-					if (ret)
+					if (ret) {
+						pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 						goto err_led;
+					}
 				}
 			}
 
@@ -2323,12 +2351,16 @@ static int microp_i2c_config_microp(struct i2c_client *client)
 					microp_i2c_is_supported(FUNC_MICROP_PWM_AUTO, cdata->version)) {
 					data[1] = MICROP_I2C_PWM_AUTO;
 					ret = i2c_write_block(client, MICROP_I2C_CMD_PIN_PWM, data, 2);
-					if (ret)
+					if (ret) {
+						pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 						goto err_led;
+					}
 				} else {
 					ret = microp_i2c_write_pin_duty(client, &cdata->led_data[led]);
-					if (ret)
+					if (ret) {
+						pr_err("%s: write_pin_duty failed at %d\n", __func__, __LINE__);
 						goto err_led;
+					}
 				}
 			}
 			mutex_unlock(&cdata->led_data[led].pin_mutex);
@@ -2343,16 +2375,20 @@ static int microp_i2c_config_microp(struct i2c_client *client)
 				data[1] = config;
 				ret = i2c_write_block(client, MICROP_I2C_CMD_PIN_CONFIG, data,
 						2);
-				if (ret)
+				if (ret) {
+					pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 					goto exit;
+				}
 			}
 			for (j = 0; j < 10; j++) {
 				data[j * 2] = (uint8_t)(pdata->pin_config[i].levels[j] >> 8);
 				data[j * 2 + 1] = (uint8_t)(pdata->pin_config[i].levels[j]);
 			}
 			ret = i2c_write_block(client, MICROP_I2C_CMD_ADC_TABLE, data, 20);
-			if (ret)
+			if (ret) {
+				pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 				goto exit;
+			}
 		} else if (microp_i2c_is_intr(config)) {
 			if (!microp_i2c_is_supported(FUNC_MICROP_INTR_IF, cdata->version))
 				continue;
@@ -2360,8 +2396,10 @@ static int microp_i2c_config_microp(struct i2c_client *client)
 
 			data[1] = MICROP_PIN_CONFIG_INTR;
 			ret = i2c_write_block(client, MICROP_I2C_CMD_PIN_CONFIG, data, 2);
-			if (ret)
+			if (ret) {
+				pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 				goto exit;
+			}
 
 			data[1] = pdata->pin_config[i].mask[0];
 			data[2] = pdata->pin_config[i].mask[1];
@@ -2371,16 +2409,20 @@ static int microp_i2c_config_microp(struct i2c_client *client)
 			data[6] = pdata->pin_config[i].setting[2];
 			data[7] = microp_i2c_is_intr_all(config);
 			ret = i2c_write_block(client, MICROP_I2C_CMD_INTR_SETTING, data, 8);
-			if (ret)
+			if (ret) {
+				pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 				goto exit;
+			}
 		} else if (microp_i2c_is_pullup(config)) {
 			if (!microp_i2c_is_supported(FUNC_MICROP_PULL_UP, cdata->version))
 				continue;
 			data[0] = pin;
 			data[1] = 1;
 			ret = i2c_write_block(client, MICROP_I2C_CMD_PIN_PULL_UP, data, 2);
-			if (ret)
+			if (ret) {
+				pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 				goto exit;
+			}
 		} else if (microp_i2c_is_pullup1(config)) {
 			if (!microp_i2c_is_supported(FUNC_MICROP_PULL_UP1, cdata->version))
 				continue;
@@ -2388,8 +2430,10 @@ static int microp_i2c_config_microp(struct i2c_client *client)
 			data[1] = pdata->pin_config[i].mask[1];
 			data[2] = pdata->pin_config[i].mask[2];
 			ret = i2c_write_block(client, MICROP_I2C_CMD_PIN_PULL_UP1, data, 3);
-			if (ret)
+			if (ret) {
+				pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 				goto exit;
+			}
 		} else if (microp_i2c_is_ls_gpio(config)) {
 			if (!microp_i2c_is_supported(FUNC_MICROP_LS_GPIO, cdata->version))
 				continue;
@@ -2397,8 +2441,10 @@ static int microp_i2c_config_microp(struct i2c_client *client)
 			data[0] = pin;
 			data[1] = 0x1;
 			ret = i2c_write_block(client, MICROP_I2C_CMD_PIN_CONFIG, data, 2);
-			if (ret)
+			if (ret) {
+				pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 				goto err_led;
+			}
 			mutex_unlock(&cdata->led_data[led].pin_mutex);
 			led++;
 			cdata->microp_gpio_pwm_is_enabled = 1;
@@ -2408,8 +2454,10 @@ static int microp_i2c_config_microp(struct i2c_client *client)
 			data[0] = pdata->pin_config[i].intr_pin;
 			data[1] = pdata->pin_config[i].adc_pin;
 			ret = i2c_write_block(client, MICROP_I2C_CMD_ADC_INTR, data, 2);
-			if (ret)
+			if (ret) {
+				pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 				goto exit;
+			}
 
 			INIT_DELAYED_WORK(&hpin_work, microp_i2c_hpin_work_func);
 		}
@@ -2427,8 +2475,10 @@ static int microp_i2c_config_microp(struct i2c_client *client)
 				MICROP_I2C_CMD_LED_AUTO_TABLE, data, 5);
 			/* make sure FW has finished this command handle */
 			mdelay(1);
-			if (ret)
+			if (ret) {
+				pr_err("%s: write_block failed at %d\n", __func__, __LINE__);
 				goto exit;
+			}
 		}
 	}
 
@@ -2462,8 +2512,12 @@ static void microp_early_suspend(struct early_suspend *h)
 	struct i2c_client *client = private_microp_client;
 	struct microp_i2c_platform_data *pdata;
 	ldata = container_of(ldev_lcd_backlight, struct microp_led_data, ldev);
-	if (!client)
+
+	if (!client) {
+		printk(KERN_ERR "%s: dataset: client is empty\n", __func__);
 		return;
+	}
+
 	cdata = i2c_get_clientdata(client);
 	pdata = client->dev.platform_data;
 	atomic_set(&cdata->suspended_now, 1);
@@ -2520,8 +2574,12 @@ static void microp_late_resume(struct early_suspend *h)
 	struct microp_i2c_platform_data *pdata;
 	uint8_t loop_i, config;
 	int ret;
-	if (!client)
+
+	if (!client) {
+		printk(KERN_ERR "%s: dataset: client is empty\n", __func__);
 		return;
+	}
+
 	cdata = i2c_get_clientdata(client);
 	pdata = client->dev.platform_data;
 
